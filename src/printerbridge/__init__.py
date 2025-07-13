@@ -59,24 +59,46 @@ class USBPrinter:
     def ensure_is_connected(self) -> None:
         """Ensure the printer is connected."""
         if not self.device:
-            self.connect()
+            try:
+                self.connect()
+            except USBPrinterError as e:
+                logger.error(f"Failed to connect to printer: {e}")
+                raise
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error during connect: {type(e).__name__}: {e}"
+                )
+                raise
             return
 
         try:
             # Try to write a small command to check connection
             self.write(b"\x1b\x40")  # ESC @ (initialize printer)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                f"Printer write failed, attempting reconnect: {type(e).__name__}: {e}"
+            )
             try:
                 self.disconnect()  # Disconnect if write fails
                 self.connect()  # Try to reconnect if write fails
-            except Exception:
-                return
+                logger.info("Reconnected to printer after write failure.")
+            except USBPrinterError as e2:
+                logger.error(f"Failed to reconnect to printer: {e2}")
+                raise
+            except Exception as e2:
+                logger.error(
+                    f"Unexpected error during reconnect: {type(e2).__name__}: {e2}"
+                )
+                raise
 
     def connect(self) -> None:
         """Connect to the USB printer."""
         # Find the printer
         self.device = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)  # type: ignore
         if self.device is None:
+            logger.error(
+                f"Printer not found (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
+            )
             raise USBPrinterError(
                 f"Printer not found (VID: 0x{self.vendor_id:04x}, "
                 f"PID: 0x{self.product_id:04x})"
@@ -85,51 +107,88 @@ class USBPrinter:
         # Set configuration (ignore errors if already configured)
         try:
             self.device.set_configuration()
-        except usb.core.USBError:
+        except usb.core.USBError as e:
+            logger.debug(f"USBError during set_configuration: {e}")
             pass
+        except Exception as e:
+            logger.error(
+                f"Unexpected error during set_configuration: {type(e).__name__}: {e}"
+            )
+            raise
 
         # Find endpoints
-        cfg = self.device.get_active_configuration()
-        intf = cfg[(0, 0)]
+        try:
+            cfg = self.device.get_active_configuration()
+            interfaces = list(cfg)
+            if not interfaces:
+                logger.error("Could not find any interface in configuration")
+                raise USBPrinterError("Could not find any interface in configuration")
+            intf = interfaces[0]
 
-        self.endpoint_out = usb.util.find_descriptor(
-            intf,
-            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-            == usb.util.ENDPOINT_OUT,
-        )
+            # Use interface's children directly for endpoint search
+            self.endpoint_out = usb.util.find_descriptor(
+                intf,
+                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
+                == usb.util.ENDPOINT_OUT,
+            )
 
-        if not self.endpoint_out:
-            raise USBPrinterError("Could not find output endpoint")
+            if not self.endpoint_out:
+                logger.error("Could not find output endpoint")
+                raise USBPrinterError("Could not find output endpoint")
 
-        self.endpoint_in = usb.util.find_descriptor(
-            intf,
-            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-            == usb.util.ENDPOINT_IN,
-        )
+            self.endpoint_in = usb.util.find_descriptor(
+                intf,
+                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
+                == usb.util.ENDPOINT_IN,
+            )
+        except Exception as e:
+            logger.error(f"Error finding endpoints: {type(e).__name__}: {e}")
+            raise
 
         logger.info(
-            f"Connected to printer (VID: 0x{self.vendor_id:04x}, "
-            f"PID: 0x{self.product_id:04x})"
+            f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
         )
 
     def write(self, data: bytes) -> bool:
         """Write data to the printer. Returns True if successful."""
-        chunk_size = self.endpoint_out.wMaxPacketSize
-        for i in range(0, len(data), chunk_size):
-            chunk = data[i : i + chunk_size]
-            self.endpoint_out.write(chunk)
-        return True
+        # Robust endpoint type check
+        if not self.endpoint_out:
+            logger.error("Output endpoint not available.")
+            return False
+        if not hasattr(self.endpoint_out, "wMaxPacketSize") or not hasattr(
+            self.endpoint_out, "write"
+        ):
+            logger.error(
+                f"Output endpoint object is invalid: {type(self.endpoint_out)}"
+            )
+            return False
+        chunk_size = getattr(self.endpoint_out, "wMaxPacketSize", 64)
+        try:
+            for i in range(0, len(data), chunk_size):
+                chunk = data[i : i + chunk_size]
+                self.endpoint_out.write(chunk)
+            return True
+        except Exception as e:
+            logger.error(f"Error writing to printer: {type(e).__name__}: {e}")
+            return False
 
     def read(self, size: int = 64, timeout: int = 100) -> Optional[bytes]:
         """Read data from the printer (if supported)."""
+        # Robust endpoint type check
         if not self.endpoint_in:
+            logger.debug("Input endpoint not available.")
             return None
-
+        if not hasattr(self.endpoint_in, "read"):
+            logger.debug(f"Input endpoint object is invalid: {type(self.endpoint_in)}")
+            return None
         try:
             data = self.endpoint_in.read(size, timeout)
             return bytes(data)
         except usb.core.USBError:
             return None  # Timeout is expected
+        except Exception as e:
+            logger.error(f"Error reading from printer: {type(e).__name__}: {e}")
+            return None
 
     def disconnect(self) -> None:
         """Disconnect from the printer."""
