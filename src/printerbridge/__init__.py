@@ -63,10 +63,10 @@ class USBPrinter:
             return
 
         try:
-            # Send ESC/POS status request
-            status_cmd = b"\x10\x04\x01"  # DLE EOT n (paper status)
-            self.write(status_cmd)
+            # Try to write a small command to check connection
+            self.write(b"\x1b\x40")  # ESC @ (initialize printer)
         except usb.core.USBError:
+            self.disconnect()  # Disconnect if write fails
             self.connect()  # Try to reconnect if write fails
 
     def connect(self) -> None:
