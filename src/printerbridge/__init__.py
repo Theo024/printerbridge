@@ -111,10 +111,6 @@ class USBPrinter:
 
     def write(self, data: bytes) -> bool:
         """Write data to the printer. Returns True if successful."""
-        if not self.endpoint_out:
-            raise USBPrinterError("Not connected to printer")
-
-        # Write data in chunks
         chunk_size = self.endpoint_out.wMaxPacketSize
         for i in range(0, len(data), chunk_size):
             chunk = data[i : i + chunk_size]
