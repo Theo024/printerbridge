@@ -75,17 +75,12 @@ class USBPrinter:
             f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
         )
 
-    def write(self, data: bytes) -> bool:
+    def write(self, data: bytes) -> None:
         """Write data to the printer. Returns True if successful."""
         chunk_size = self.endpoint_out.wMaxPacketSize
-        try:
-            for i in range(0, len(data), chunk_size):
-                chunk = data[i : i + chunk_size]
-                self.endpoint_out.write(chunk)
-            return True
-        except Exception as e:
-            logger.error(f"Error writing to printer: {type(e).__name__}: {e}")
-            return False
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
+            self.endpoint_out.write(chunk)
 
     def read(self, size: int = 64, timeout: int = 100) -> Optional[bytes]:
         """Read data from the printer (if supported)."""
@@ -94,9 +89,6 @@ class USBPrinter:
             return bytes(data)
         except usb.core.USBError:
             return None  # Timeout is expected
-        except Exception as e:
-            logger.error(f"Error reading from printer: {type(e).__name__}: {e}")
-            return None
 
     def disconnect(self) -> None:
         """Disconnect from the printer."""
@@ -177,13 +169,11 @@ class TCPPrinterBridge:
                 logger.debug(f"Received {len(data)} bytes from client")
 
                 # Send to printer
-                if self.printer.write(data):
-                    response = self.printer.read(500)
-                    if response:
-                        client_socket.send(response)
-                        logger.debug(f"Sent {len(response)} bytes response to client")
-                else:
-                    logger.error("Failed to write data to printer.")
+                self.printer.write(data)
+                response = self.printer.read(500)
+                if response:
+                    client_socket.send(response)
+                    logger.debug(f"Sent {len(response)} bytes response to client")
 
         except Exception as e:
             logger.error(f"Client handling error: {type(e).__name__}: {e}")
