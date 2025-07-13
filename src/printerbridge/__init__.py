@@ -25,7 +25,6 @@ import logging
 import signal
 import socket
 import sys
-from contextlib import contextmanager
 from typing import Optional
 
 try:
@@ -69,15 +68,6 @@ class USBPrinter:
             self.write(status_cmd)
         except usb.core.USBError:
             self.connect()  # Try to reconnect if write fails
-
-    @contextmanager
-    def connection(self):
-        """Context manager for printer connection."""
-        try:
-            self.connect()
-            yield self
-        finally:
-            self.disconnect()
 
     def connect(self) -> None:
         """Connect to the USB printer."""
@@ -185,7 +175,7 @@ class TCPPrinterBridge:
         # Create server socket
         try:
             self.server_socket = socket.create_server((self.host, self.port))
-            self.server_socket.settimeout(self.timeout)
+            self.server_socket.settimeout(1.0)
 
             self.running = True
             logger.info(f"Server listening on port {self.port}")
@@ -195,6 +185,7 @@ class TCPPrinterBridge:
                     client_socket, client_address = self.server_socket.accept()
                     logger.info(f"Client connected from {client_address}")
                     with client_socket:
+                        client_socket.settimeout(self.timeout)
                         self.handle_client(client_socket)
 
                 except socket.timeout:
@@ -212,8 +203,6 @@ class TCPPrinterBridge:
 
     def handle_client(self, client_socket: socket.socket):
         """Handle individual client connection"""
-        client_socket.settimeout(self.timeout)
-
         try:
             # Verify printer connection
             self.printer.ensure_is_connected()
