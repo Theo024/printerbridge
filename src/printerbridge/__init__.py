@@ -61,11 +61,12 @@ class USBPrinter:
         """Ensure the printer is connected."""
         if not self.device:
             self.connect()
+            return
 
         try:
             # Send ESC/POS status request
             status_cmd = b"\x10\x04\x01"  # DLE EOT n (paper status)
-            self.device.write(status_cmd)
+            self.write(status_cmd)
         except usb.core.USBError:
             self.connect()  # Try to reconnect if write fails
 
