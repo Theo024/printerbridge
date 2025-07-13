@@ -174,16 +174,14 @@ class TCPPrinterBridge:
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
-                    logger.info(f"Client connected from {client_address}")
-                    with client_socket:
-                        client_socket.settimeout(self.timeout)
-                        self.handle_client(client_socket)
                 except socket.timeout:
                     continue
-                except Exception as e:
-                    if self.running:
-                        logger.error(f"Server error: {type(e).__name__}: {e}")
-                    continue  # Try to continue serving
+
+                logger.info(f"Client connected from {client_address}")
+                self.printer.ensure_is_connected()
+                with client_socket:
+                    client_socket.settimeout(self.timeout)
+                    self.handle_client(client_socket)
         except Exception as e:
             logger.error(f"Failed to start server: {type(e).__name__}: {e}")
             raise
@@ -193,8 +191,6 @@ class TCPPrinterBridge:
     def handle_client(self, client_socket: socket.socket) -> None:
         """Handle individual client connection"""
         try:
-            self.printer.ensure_is_connected()
-
             while self.running:
                 try:
                     data = client_socket.recv(8192)
