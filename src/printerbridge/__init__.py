@@ -73,7 +73,9 @@ class USBPrinter:
 
         try:
             # Try to write a small command to check connection
-            self.write(b"\x1b\x40")  # ESC @ (initialize printer)
+            result = self.write(b"\x1b\x40")  # ESC @ (initialize printer)
+            if not result:
+                raise USBPrinterError("Printer write failed (connection check)")
         except Exception as e:
             logger.warning(
                 f"Printer write failed, attempting reconnect: {type(e).__name__}: {e}"
@@ -116,31 +118,28 @@ class USBPrinter:
             )
             raise
 
-        # Find endpoints
+        # Find endpoints (use interface and endpoint objects, not generators)
         try:
             cfg = self.device.get_active_configuration()
-            interfaces = list(cfg)
-            if not interfaces:
-                logger.error("Could not find any interface in configuration")
-                raise USBPrinterError("Could not find any interface in configuration")
-            intf = interfaces[0]
-
-            # Use interface's children directly for endpoint search
-            self.endpoint_out = usb.util.find_descriptor(
-                intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                == usb.util.ENDPOINT_OUT,
-            )
-
+            # Iterate over interfaces
+            self.endpoint_out = None
+            self.endpoint_in = None
+            for intf in cfg:
+                for ep in intf:
+                    if (
+                        usb.util.endpoint_direction(ep.bEndpointAddress)
+                        == usb.util.ENDPOINT_OUT
+                    ):
+                        self.endpoint_out = ep
+                    elif (
+                        usb.util.endpoint_direction(ep.bEndpointAddress)
+                        == usb.util.ENDPOINT_IN
+                    ):
+                        self.endpoint_in = ep
             if not self.endpoint_out:
                 logger.error("Could not find output endpoint")
                 raise USBPrinterError("Could not find output endpoint")
-
-            self.endpoint_in = usb.util.find_descriptor(
-                intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                == usb.util.ENDPOINT_IN,
-            )
+            # Input endpoint is optional for some printers
         except Exception as e:
             logger.error(f"Error finding endpoints: {type(e).__name__}: {e}")
             raise
