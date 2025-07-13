@@ -114,16 +114,12 @@ class USBPrinter:
         if not self.endpoint_out:
             raise USBPrinterError("Not connected to printer")
 
-        try:
-            # Write data in chunks
-            chunk_size = self.endpoint_out.wMaxPacketSize
-            for i in range(0, len(data), chunk_size):
-                chunk = data[i : i + chunk_size]
-                self.endpoint_out.write(chunk)
-            return True
-        except usb.core.USBError as e:
-            logger.error(f"USB write error: {e}")
-            return False
+        # Write data in chunks
+        chunk_size = self.endpoint_out.wMaxPacketSize
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
+            self.endpoint_out.write(chunk)
+        return True
 
     def read(self, size: int = 64, timeout: int = 100) -> Optional[bytes]:
         """Read data from the printer (if supported)."""
