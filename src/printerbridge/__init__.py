@@ -1,15 +1,40 @@
+#!/usr/bin/env python3
+"""
+TCP-to-USB ESC/POS Printer Bridge
+A Python application that bridges TCP clients to USB ESC/POS printers.
+
+Usage:
+    python escpos_bridge.py [options]
+
+Options:
+    -p, --port PORT         TCP port to listen on (default: 9100)
+    -t, --timeout TIMEOUT  Connection timeout in seconds (default: 3)
+    -d, --device DEVICE     USB device selection (vendor:product)
+    -c, --config CONFIG     Configuration file path
+    -v, --verbose           Enable verbose logging
+    --debug                 Enable debug logging
+    -h, --help              Show this help message
+
+Requirements:
+    - pyusb (pip install pyusb)
+    - Linux with libusb
+"""
+
 import argparse
-import asyncio
 import logging
 import signal
+import socket
 import sys
 from contextlib import contextmanager
 from typing import Optional
 
-import usb.core
-import usb.util
+try:
+    import usb.core
+    import usb.util
+except ImportError:
+    print("Error: pyusb not installed. Run: pip install pyusb")
+    sys.exit(1)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -28,9 +53,21 @@ class USBPrinter:
     def __init__(self, vendor_id: int, product_id: int):
         self.vendor_id = vendor_id
         self.product_id = product_id
-        self.device = None
+        self.device: Optional[usb.core.Device] = None
         self.endpoint_out = None
         self.endpoint_in = None
+
+    def ensure_is_connected(self) -> None:
+        """Ensure the printer is connected."""
+        if not self.device:
+            self.connect()
+
+        try:
+            # Send ESC/POS status request
+            status_cmd = b"\x10\x04\x01"  # DLE EOT n (paper status)
+            self.device.write(status_cmd)
+        except usb.core.USBError:
+            self.connect()  # Try to reconnect if write fails
 
     @contextmanager
     def connection(self):
@@ -44,20 +81,12 @@ class USBPrinter:
     def connect(self) -> None:
         """Connect to the USB printer."""
         # Find the printer
-        self.device = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)
-        if not self.device:
+        self.device = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)  # type: ignore
+        if self.device is None:
             raise USBPrinterError(
                 f"Printer not found (VID: 0x{self.vendor_id:04x}, "
                 f"PID: 0x{self.product_id:04x})"
             )
-
-        # Detach kernel driver if necessary
-        if self.device.is_kernel_driver_active(0):
-            try:
-                self.device.detach_kernel_driver(0)
-                logger.info("Detached kernel driver")
-            except usb.core.USBError as e:
-                raise USBPrinterError(f"Could not detach kernel driver: {e}")
 
         # Set configuration (ignore errors if already configured)
         try:
@@ -128,71 +157,113 @@ class USBPrinter:
                 self.endpoint_in = None
 
 
-class PrinterBridge:
-    """TCP server that bridges network connections to USB printer."""
+class TCPPrinterBridge:
+    """TCP server that bridges connections to USB ESC/POS printer"""
 
-    def __init__(self, printer: USBPrinter, host: str = "0.0.0.0", port: int = 9100):
+    def __init__(
+        self,
+        printer: USBPrinter,
+        host: str = "0.0.0.0",
+        port: int = 9100,
+        timeout: int = 3,
+    ):
         self.printer = printer
         self.host = host
         self.port = port
-        self.server = None
-        self._shutdown_event = asyncio.Event()
+        self.timeout = timeout
+        self.server_socket = None
+        self.running = False
 
-    async def handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """Handle a client connection."""
-        client_addr = writer.get_extra_info("peername")
-        logger.info(f"Client connected from {client_addr}")
+    def start(self) -> None:
+        """Start the TCP server"""
+        logger.info(f"Starting TCP-to-USB ESC/POS bridge on port {self.port}")
 
+        # Connect to printer
+        if not self.printer.connect():
+            logger.error("Failed to connect to USB printer")
+            raise
+
+        # Create server socket
         try:
-            while not reader.at_eof():
-                # Read data from client
-                data = await reader.read(4096)
-                if not data:
-                    break
+            self.server_socket = socket.create_server((self.host, self.port))
+            self.server_socket.settimeout(self.timeout)
 
-                logger.debug(f"Received {len(data)} bytes from client")
+            self.running = True
+            logger.info(f"Server listening on port {self.port}")
 
-                # Forward to printer
+            while self.running:
                 try:
-                    self.printer.write(data)
-                    logger.debug("Data sent to printer successfully")
+                    client_socket, client_address = self.server_socket.accept()
+                    logger.info(f"Client connected from {client_address}")
+                    with client_socket:
+                        self.handle_client(client_socket)
 
-                    # Try to read response from printer
-                    if response := self.printer.read(timeout=50):
-                        logger.debug(f"Received {len(response)} bytes from printer")
-                        writer.write(response)
-                        await writer.drain()
-                except USBPrinterError as e:
-                    logger.error(f"Printer error: {e}")
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        logger.error(f"Server error: {e}")
                     break
 
         except Exception as e:
-            logger.error(f"Error handling client: {e}")
+            logger.error(f"Failed to start server: {e}")
+            raise
         finally:
-            logger.info(f"Client {client_addr} disconnected")
-            writer.close()
-            await writer.wait_closed()
+            self.cleanup()
 
-    async def start(self) -> None:
-        """Start the TCP server."""
-        self.server = await asyncio.start_server(
-            self.handle_client, self.host, self.port
-        )
+    def handle_client(self, client_socket: socket.socket):
+        """Handle individual client connection"""
+        client_socket.settimeout(self.timeout)
 
-        addr = self.server.sockets[0].getsockname()
-        logger.info(f"Printer bridge listening on {addr[0]}:{addr[1]}")
+        try:
+            # Verify printer connection
+            self.printer.ensure_is_connected()
 
-        # Setup signal handlers
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, self._shutdown_event.set)
+            data = client_socket.recv(8192)
+            if not data:
+                return
 
-        async with self.server:
-            # Wait for shutdown signal
-            await self._shutdown_event.wait()
-            logger.info("Shutting down server...")
+            logger.debug(f"Received {len(data)} bytes from client")
+
+            # Send to printer
+            if self.printer.write(data):
+                # Try to read response from printer
+                response = self.printer.read(500)
+                if response:
+                    client_socket.send(response)
+                    logger.debug(f"Sent {len(response)} bytes response to client")
+
+        except socket.timeout:
+            logger.info("Client connection timed out")
+        except socket.error as e:
+            logger.info(f"Client disconnected: {e}")
+        except Exception as e:
+            logger.error(f"Client handling error: {e}")
+
+    def stop(self):
+        """Stop the server"""
+        logger.info("Stopping server...")
+        self.running = False
+
+        # Close server socket
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+
+    def cleanup(self):
+        """Clean up resources"""
+        self.stop()
+        self.printer.disconnect()
+        logger.info("Server stopped")
+
+
+def signal_handler(signum, frame, bridge):
+    """Handle shutdown signals"""
+    logging.info(f"Received signal {signum}, shutting down...")
+    bridge.stop()
+    sys.exit(0)
 
 
 def parse_hex(value: str) -> int:
@@ -200,20 +271,35 @@ def parse_hex(value: str) -> int:
     return int(value, 16)
 
 
-def main() -> None:
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="USB Network Bridge")
+def main():
+    """Main application entry point"""
+    parser = argparse.ArgumentParser(description="TCP-to-USB ESC/POS Printer Bridge")
+    parser.add_argument(
+        "-h",
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to listen on (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=9100,
+        help="TCP port to listen on (default: 9100)",
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=3,
+        help="Connection timeout in seconds (default: 3)",
+    )
     parser.add_argument(
         "--vid", type=parse_hex, required=True, help="USB Vendor ID (hex)"
     )
     parser.add_argument(
         "--pid", type=parse_hex, required=True, help="USB Product ID (hex)"
-    )
-    parser.add_argument(
-        "--host", default="0.0.0.0", help="Host to listen on (default: 0.0.0.0)"
-    )
-    parser.add_argument(
-        "--port", type=int, default=9100, help="Port to listen on (default: 9100)"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
@@ -223,18 +309,19 @@ def main() -> None:
     if args.debug:
         logger.setLevel(logging.DEBUG)
 
-    # Create and run the bridge
+    # Create bridge
     printer = USBPrinter(args.vid, args.pid)
+    bridge = TCPPrinterBridge(printer, args.port, args.timeout)
 
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, bridge))
+    signal.signal(signal.SIGTERM, lambda s, f: signal_handler(s, f, bridge))
+
+    # Start server
     try:
-        with printer.connection():
-            bridge = PrinterBridge(printer, args.host, args.port)
-            asyncio.run(bridge.start())
+        bridge.start()
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-    except USBPrinterError as e:
-        logger.error(str(e))
-        sys.exit(1)
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         sys.exit(1)
