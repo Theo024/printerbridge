@@ -45,38 +45,57 @@ class USBPrinter:
                 f"Printer not found (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
             )
 
-        # Set configuration (ignore errors if already configured)
         try:
-            self.device.set_configuration()
-        except usb.core.USBError as e:
-            logger.debug(f"USBError during set_configuration: {e}")
+            # Set configuration (ignore errors if already configured)
+            try:
+                self.device.set_configuration()
+            except usb.core.USBError as e:
+                logger.debug(f"USBError during set_configuration: {e}")
 
-        # Find endpoints
-        cfg = self.device.get_active_configuration()
-        self.endpoint_out = None
-        self.endpoint_in = None
-        for intf in cfg:
-            for ep in intf:
-                if (
-                    usb.util.endpoint_direction(ep.bEndpointAddress)
-                    == usb.util.ENDPOINT_OUT
-                ):
-                    self.endpoint_out = ep
-                elif (
-                    usb.util.endpoint_direction(ep.bEndpointAddress)
-                    == usb.util.ENDPOINT_IN
-                ):
-                    self.endpoint_in = ep
-        if not self.endpoint_out or not self.endpoint_in:
-            logger.error("Could not find endpoint")
-            raise USBPrinterError("Could not find endpoint")
+            # Find endpoints
+            cfg = self.device.get_active_configuration()
+            self.endpoint_out = None
+            self.endpoint_in = None
+            for intf in cfg:
+                for ep in intf:
+                    if (
+                        usb.util.endpoint_direction(ep.bEndpointAddress)
+                        == usb.util.ENDPOINT_OUT
+                    ):
+                        self.endpoint_out = ep
+                    elif (
+                        usb.util.endpoint_direction(ep.bEndpointAddress)
+                        == usb.util.ENDPOINT_IN
+                    ):
+                        self.endpoint_in = ep
+            if not self.endpoint_out:
+                logger.error("Could not find output endpoint")
+                raise USBPrinterError("Could not find output endpoint")
 
-        logger.info(
-            f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
-        )
+            # Input endpoint is optional for some printers
+            if not self.endpoint_in:
+                logger.warning(
+                    "No input endpoint found - printer status/responses will not be available"
+                )
+
+            logger.info(
+                f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
+            )
+        except Exception:
+            # Clean up resources on any failure
+            if self.device:
+                try:
+                    usb.util.dispose_resources(self.device)
+                except Exception:
+                    pass
+                self.device = None
+            raise
 
     def write(self, data: bytes) -> None:
         """Write data to the printer."""
+        if not self.endpoint_out:
+            raise USBPrinterError("No output endpoint available")
+
         chunk_size = self.endpoint_out.wMaxPacketSize
         for i in range(0, len(data), chunk_size):
             chunk = data[i : i + chunk_size]
@@ -84,6 +103,8 @@ class USBPrinter:
 
     def read(self, size: int = 64, timeout: int = 100) -> Optional[bytes]:
         """Read data from the printer (if supported)."""
+        if not self.endpoint_in:
+            return None  # No input endpoint available
         try:
             data = self.endpoint_in.read(size, timeout)
             return bytes(data)
@@ -120,6 +141,7 @@ class TCPPrinterBridge:
         self.timeout = timeout
         self.server_socket = None
         self.running = False
+        self._cleanup_done = False
 
     def start(self) -> None:
         """Start the TCP server"""
@@ -141,9 +163,12 @@ class TCPPrinterBridge:
                     continue
 
                 logger.info(f"Client connected from {client_address}")
-                with client_socket:
-                    client_socket.settimeout(self.timeout)
-                    self.handle_client(client_socket)
+                try:
+                    with client_socket:
+                        client_socket.settimeout(self.timeout)
+                        self.handle_client(client_socket)
+                except Exception as e:
+                    logger.error(f"Error handling client {client_address}: {e}")
         except Exception as e:
             logger.error(f"Failed to start server: {type(e).__name__}: {e}")
             raise
@@ -192,6 +217,9 @@ class TCPPrinterBridge:
 
     def cleanup(self):
         """Clean up resources"""
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
         self.stop()
         self.printer.disconnect()
         logger.info("Server stopped")
