@@ -207,19 +207,20 @@ class TCPPrinterBridge:
             # Verify printer connection
             self.printer.ensure_is_connected()
 
-            data = client_socket.recv(8192)
-            if not data:
-                return
+            while self.running:
+                data = client_socket.recv(8192)
+                if not data:
+                    return
 
-            logger.debug(f"Received {len(data)} bytes from client")
+                logger.debug(f"Received {len(data)} bytes from client")
 
-            # Send to printer
-            if self.printer.write(data):
-                # Try to read response from printer
-                response = self.printer.read(500)
-                if response:
-                    client_socket.send(response)
-                    logger.debug(f"Sent {len(response)} bytes response to client")
+                # Send to printer
+                if self.printer.write(data):
+                    # Try to read response from printer
+                    response = self.printer.read(500)
+                    if response:
+                        client_socket.send(response)
+                        logger.debug(f"Sent {len(response)} bytes response to client")
 
         except socket.timeout:
             logger.info("Client connection timed out")
