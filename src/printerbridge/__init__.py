@@ -109,8 +109,8 @@ class USBPrinter:
             f"PID: 0x{self.product_id:04x})"
         )
 
-    def write(self, data: bytes) -> None:
-        """Write data to the printer."""
+    def write(self, data: bytes) -> bool:
+        """Write data to the printer. Returns True if successful."""
         if not self.endpoint_out:
             raise USBPrinterError("Not connected to printer")
 
@@ -120,8 +120,10 @@ class USBPrinter:
             for i in range(0, len(data), chunk_size):
                 chunk = data[i : i + chunk_size]
                 self.endpoint_out.write(chunk)
+            return True
         except usb.core.USBError as e:
-            raise USBPrinterError(f"USB write error: {e}")
+            logger.error(f"USB write error: {e}")
+            return False
 
     def read(self, size: int = 64, timeout: int = 100) -> Optional[bytes]:
         """Read data from the printer (if supported)."""
@@ -168,18 +170,12 @@ class TCPPrinterBridge:
     def start(self) -> None:
         """Start the TCP server"""
         logger.info(f"Starting TCP-to-USB ESC/POS bridge on port {self.port}")
-
-        # Connect to printer
         self.printer.ensure_is_connected()
-
-        # Create server socket
         try:
             self.server_socket = socket.create_server((self.host, self.port))
             self.server_socket.settimeout(1.0)
-
             self.running = True
             logger.info(f"Server listening on port {self.port}")
-
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
@@ -187,59 +183,61 @@ class TCPPrinterBridge:
                     with client_socket:
                         client_socket.settimeout(self.timeout)
                         self.handle_client(client_socket)
-
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if self.running:
-                        logger.error(f"Server error: {e}")
-                    break
-
+                        logger.error(f"Server error: {type(e).__name__}: {e}")
+                    continue  # Try to continue serving
         except Exception as e:
-            logger.error(f"Failed to start server: {e}")
+            logger.error(f"Failed to start server: {type(e).__name__}: {e}")
             raise
         finally:
             self.cleanup()
 
-    def handle_client(self, client_socket: socket.socket):
+    def handle_client(self, client_socket: socket.socket) -> None:
         """Handle individual client connection"""
         try:
-            # Verify printer connection
             self.printer.ensure_is_connected()
 
             while self.running:
-                data = client_socket.recv(8192)
+                try:
+                    data = client_socket.recv(8192)
+                except socket.timeout:
+                    logger.info("Client connection timed out (recv)")
+                    break
+                except socket.error as e:
+                    logger.info(f"Client disconnected (recv): {e}")
+                    break
                 if not data:
-                    return
+                    logger.info("Client sent no data, closing connection.")
+                    break
 
                 logger.debug(f"Received {len(data)} bytes from client")
 
                 # Send to printer
                 if self.printer.write(data):
-                    # Try to read response from printer
                     response = self.printer.read(500)
                     if response:
                         client_socket.send(response)
                         logger.debug(f"Sent {len(response)} bytes response to client")
+                else:
+                    logger.error("Failed to write data to printer.")
 
-        except socket.timeout:
-            logger.info("Client connection timed out")
-        except socket.error as e:
-            logger.info(f"Client disconnected: {e}")
         except Exception as e:
-            logger.error(f"Client handling error: {e}")
+            logger.error(f"Client handling error: {type(e).__name__}: {e}")
+            raise
 
     def stop(self):
         """Stop the server"""
         logger.info("Stopping server...")
         self.running = False
-
-        # Close server socket
         if self.server_socket:
             try:
                 self.server_socket.close()
-            except Exception:
-                pass
+                self.server_socket = None
+            except Exception as e:
+                logger.error(f"Error closing server socket: {e}")
 
     def cleanup(self):
         """Clean up resources"""
