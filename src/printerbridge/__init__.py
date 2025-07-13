@@ -76,7 +76,7 @@ class USBPrinter:
         )
 
     def write(self, data: bytes) -> None:
-        """Write data to the printer. Returns True if successful."""
+        """Write data to the printer."""
         chunk_size = self.endpoint_out.wMaxPacketSize
         for i in range(0, len(data), chunk_size):
             chunk = data[i : i + chunk_size]
