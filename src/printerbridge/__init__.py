@@ -298,7 +298,7 @@ def main():
 
     # Create bridge
     printer = USBPrinter(args.vid, args.pid)
-    bridge = TCPPrinterBridge(printer, args.port, args.timeout)
+    bridge = TCPPrinterBridge(printer, args.host, args.port, args.timeout)
 
     # Setup signal handlers
     signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, bridge))
