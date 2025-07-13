@@ -65,7 +65,7 @@ class USBPrinter:
         try:
             # Try to write a small command to check connection
             self.write(b"\x1b\x40")  # ESC @ (initialize printer)
-        except usb.core.USBError:
+        except Exception:
             self.disconnect()  # Disconnect if write fails
             self.connect()  # Try to reconnect if write fails
 
