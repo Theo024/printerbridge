@@ -25,6 +25,7 @@ import logging
 import signal
 import socket
 import sys
+import time
 from typing import Optional
 
 try:
@@ -59,93 +60,81 @@ class USBPrinter:
     def ensure_is_connected(self) -> None:
         """Ensure the printer is connected."""
         if not self.device:
-            try:
-                self.connect()
-            except USBPrinterError as e:
-                logger.error(f"Failed to connect to printer: {e}")
-                raise
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error during connect: {type(e).__name__}: {e}"
-                )
-                raise
+            self.connect()
             return
 
+        # Try to write a small command to check connection
         try:
-            # Try to write a small command to check connection
             result = self.write(b"\x1b\x40")  # ESC @ (initialize printer)
-            if not result:
-                raise USBPrinterError("Printer write failed (connection check)")
+            if result:
+                return  # Connection is good
+            raise USBPrinterError("Printer write failed (connection check)")
         except Exception as e:
             logger.warning(
                 f"Printer write failed, attempting reconnect: {type(e).__name__}: {e}"
             )
-            try:
-                self.disconnect()  # Disconnect if write fails
-                self.connect()  # Try to reconnect if write fails
-                logger.info("Reconnected to printer after write failure.")
-            except USBPrinterError as e2:
-                logger.error(f"Failed to reconnect to printer: {e2}")
-                raise
-            except Exception as e2:
-                logger.error(
-                    f"Unexpected error during reconnect: {type(e2).__name__}: {e2}"
+            self.disconnect()
+            time.sleep(0.5)
+            self.connect()
+            # One more check after reconnect
+            if not self.write(b"\x1b\x40"):
+                raise USBPrinterError(
+                    "Failed to reconnect to printer after write failure."
                 )
-                raise
 
     def connect(self) -> None:
         """Connect to the USB printer."""
-        # Find the printer
-        self.device = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)  # type: ignore
-        if self.device is None:
-            logger.error(
-                f"Printer not found (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
-            )
-            raise USBPrinterError(
-                f"Printer not found (VID: 0x{self.vendor_id:04x}, "
-                f"PID: 0x{self.product_id:04x})"
-            )
-
-        # Set configuration (ignore errors if already configured)
-        try:
-            self.device.set_configuration()
-        except usb.core.USBError as e:
-            logger.debug(f"USBError during set_configuration: {e}")
-            pass
-        except Exception as e:
-            logger.error(
-                f"Unexpected error during set_configuration: {type(e).__name__}: {e}"
-            )
-            raise
-
-        # Find endpoints (use interface and endpoint objects, not generators)
-        try:
-            cfg = self.device.get_active_configuration()
-            # Iterate over interfaces
-            self.endpoint_out = None
-            self.endpoint_in = None
-            for intf in cfg:
-                for ep in intf:
-                    if (
-                        usb.util.endpoint_direction(ep.bEndpointAddress)
-                        == usb.util.ENDPOINT_OUT
-                    ):
-                        self.endpoint_out = ep
-                    elif (
-                        usb.util.endpoint_direction(ep.bEndpointAddress)
-                        == usb.util.ENDPOINT_IN
-                    ):
-                        self.endpoint_in = ep
-            if not self.endpoint_out:
-                logger.error("Could not find output endpoint")
-                raise USBPrinterError("Could not find output endpoint")
-            # Input endpoint is optional for some printers
-        except Exception as e:
-            logger.error(f"Error finding endpoints: {type(e).__name__}: {e}")
-            raise
-
-        logger.info(
-            f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
+        # Retry device discovery and endpoint setup up to 3 times
+        for attempt in range(3):
+            self.device = usb.core.find(
+                idVendor=self.vendor_id, idProduct=self.product_id
+            )  # type: ignore
+            if self.device is None:
+                logger.error(
+                    f"Printer not found (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x}) [attempt {attempt + 1}]"
+                )
+                time.sleep(0.5)
+                continue
+            try:
+                # Set configuration (ignore errors if already configured)
+                try:
+                    self.device.set_configuration()
+                except usb.core.USBError as e:
+                    logger.debug(f"USBError during set_configuration: {e}")
+                # Find endpoints
+                cfg = self.device.get_active_configuration()
+                self.endpoint_out = None
+                self.endpoint_in = None
+                for intf in cfg:
+                    for ep in intf:
+                        if (
+                            usb.util.endpoint_direction(ep.bEndpointAddress)
+                            == usb.util.ENDPOINT_OUT
+                        ):
+                            self.endpoint_out = ep
+                        elif (
+                            usb.util.endpoint_direction(ep.bEndpointAddress)
+                            == usb.util.ENDPOINT_IN
+                        ):
+                            self.endpoint_in = ep
+                if not self.endpoint_out:
+                    logger.error("Could not find output endpoint")
+                    raise USBPrinterError("Could not find output endpoint")
+                # Success
+                logger.info(
+                    f"Connected to printer (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    f"Error during device setup (attempt {attempt + 1}): {type(e).__name__}: {e}"
+                )
+                usb.util.dispose_resources(self.device)
+                time.sleep(0.5)
+                continue
+        # If we reach here, all attempts failed
+        raise USBPrinterError(
+            f"Failed to connect to printer after 3 attempts (VID: 0x{self.vendor_id:04x}, PID: 0x{self.product_id:04x})"
         )
 
     def write(self, data: bytes) -> bool:
