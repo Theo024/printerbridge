@@ -179,9 +179,7 @@ class TCPPrinterBridge:
         logger.info(f"Starting TCP-to-USB ESC/POS bridge on port {self.port}")
 
         # Connect to printer
-        if not self.printer.connect():
-            logger.error("Failed to connect to USB printer")
-            raise
+        self.printer.ensure_is_connected()
 
         # Create server socket
         try:
