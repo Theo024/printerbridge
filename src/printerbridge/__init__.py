@@ -275,7 +275,6 @@ def main():
     """Main application entry point"""
     parser = argparse.ArgumentParser(description="TCP-to-USB ESC/POS Printer Bridge")
     parser.add_argument(
-        "-h",
         "--host",
         type=str,
         default="0.0.0.0",
