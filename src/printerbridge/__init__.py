@@ -94,7 +94,9 @@ class USBPrinter:
     def write(self, data: bytes) -> None:
         """Write data to the printer."""
         if not self.endpoint_out:
-            raise USBPrinterError("No output endpoint available")
+            self.disconnect()
+            self.connect()
+            # raise USBPrinterError("No output endpoint available")
 
         try:
             chunk_size = self.endpoint_out.wMaxPacketSize
